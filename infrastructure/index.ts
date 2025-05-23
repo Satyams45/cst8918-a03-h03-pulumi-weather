@@ -1,5 +1,8 @@
 import * as pulumi from "@pulumi/pulumi";
+import * as resources from '@pulumi/azure-native/resources'
+import * as containerregistry from '@pulumi/azure-native/containerregistry'
 import * as dockerBuild from '@pulumi/docker-build'
+// Other imports at the top of the module
 import * as containerinstance from '@pulumi/azure-native/containerinstance'
 // Import the configuration settings for the current stack.
 const config = new pulumi.Config()
@@ -13,12 +16,11 @@ const containerPort = config.requireNumber('containerPort')
 const publicPort = config.requireNumber('publicPort')
 const cpu = config.requireNumber('cpu')
 const memory = config.requireNumber('memory')
-
-import * as resources from '@pulumi/azure-native/resources'
-import * as containerregistry from '@pulumi/azure-native/containerregistry'
+ 
+ 
 // Create a resource group.
-const resourceGroup = new resources.ResourceGroup(`${prefixName}-rg`)
-
+const resourceGroup = new resources.ResourceGroup(`${prefixName}rg`)
+ 
 // Create the container registry.
 const registry = new containerregistry.Registry(`${prefixName}ACR`, {
   resourceGroupName: resourceGroup.name,
@@ -27,6 +29,7 @@ const registry = new containerregistry.Registry(`${prefixName}ACR`, {
     name: containerregistry.SkuName.Basic,
   },
 })
+ 
 // Get the authentication credentials for the container registry.
 const registryCredentials = containerregistry
   .listRegistryCredentialsOutput({
@@ -39,12 +42,15 @@ const registryCredentials = containerregistry
       password: creds.passwords![0].value!,
     }
   })
-// Define the container image for the service.
+ 
+ 
+ 
+// Define the container image for the service
 const image = new dockerBuild.Image(`${prefixName}-image`, {
   tags: [pulumi.interpolate`${registry.loginServer}/${imageName}:${imageTag}`],
   context: { location: appPath },
   dockerfile: { location: `${appPath}/Dockerfile` },
-  target: 'production',
+  target: 'production',  // This matches the stage defined in Dockerfile
   platforms: ['linux/amd64', 'linux/arm64'],
   push: true,
   registries: [
@@ -54,7 +60,8 @@ const image = new dockerBuild.Image(`${prefixName}-image`, {
       password: registryCredentials.password,
     },
   ],
-})
+});
+ 
 // Create a container group in the Azure Container App service and make it publicly accessible.
 const containerGroup = new containerinstance.ContainerGroup(
   `${prefixName}-container-group`,
@@ -99,7 +106,7 @@ const containerGroup = new containerinstance.ContainerGroup(
     ],
     ipAddress: {
       type: containerinstance.ContainerGroupIpAddressType.Public,
-      dnsNameLabel: `${imageName}`,
+      dnsNameLabel: `${imageName}-v2`, // or use a timestamp or short hash
       ports: [
         {
           port: publicPort,
@@ -109,6 +116,8 @@ const containerGroup = new containerinstance.ContainerGroup(
     },
   },
 )
+ 
+ 
 // Export the service's IP address, hostname, and fully-qualified URL.
 export const hostname = containerGroup.ipAddress.apply((addr) => addr!.fqdn!)
 export const ip = containerGroup.ipAddress.apply((addr) => addr!.ip!)
