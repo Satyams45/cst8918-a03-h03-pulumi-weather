@@ -25,7 +25,7 @@ ADD package.json ./
 RUN npm prune --omit=dev
 
 # Build the app
-FROM base AS build
+FROM base AS production
 
 WORKDIR /usr/src/app
 
