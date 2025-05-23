@@ -85,6 +85,9 @@ const image = new dockerBuild.Image(`${prefixName}-image`, {
   ],
 });
 
+// Unique DNS name to avoid collision
+const dnsNameLabel = `${imageName}-${Date.now()}`;
+
 // Container group deployment
 const containerGroup = new containerinstance.ContainerGroup(
   `${prefixName}-container-group`,
@@ -128,7 +131,7 @@ const containerGroup = new containerinstance.ContainerGroup(
     ],
     ipAddress: {
       type: containerinstance.ContainerGroupIpAddressType.Public,
-      dnsNameLabel: `${imageName}-v2`,
+      dnsNameLabel: dnsNameLabel,
       ports: [{ port: publicPort, protocol: "tcp" }],
     },
   }
