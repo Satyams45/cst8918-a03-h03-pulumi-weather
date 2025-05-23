@@ -9,6 +9,7 @@ interface FetchWeatherDataParams {
   lon: number
   units: 'standard' | 'metric' | 'imperial'
 }
+
 export async function fetchWeatherData({
   lat,
   lon,
@@ -16,11 +17,42 @@ export async function fetchWeatherData({
 }: FetchWeatherDataParams) {
   const queryString = `lat=${lat}&lon=${lon}&units=${units}`
 
-  const cacheEntry = await redis.get(queryString)
-  if (cacheEntry) return JSON.parse(cacheEntry)
+  try {
+    const cached = await redis.get(queryString)
+    if (cached) {
+      const parsed = JSON.parse(cached)
+      if (Array.isArray(parsed.weather)) {
+        return parsed
+      } else {
+        console.warn("Cached data missing 'weather', ignoring.")
+      }
+    }
+  } catch (err) {
+    console.error("Error reading or parsing Redis cache:", err)
+  }
 
   const response = await fetch(`${BASE_URL}?${queryString}&appid=${API_KEY}`)
-  const data = await response.text() // avoid an unnecessary extra JSON.stringify
-  await redis.set(queryString, data, {PX: TEN_MINUTES}) // The PX option sets the expiry time
-  return JSON.parse(data)
+
+  if (!response.ok) {
+    const msg = await response.text()
+    console.error("OpenWeather API error:", response.status, msg)
+    throw new Error("Failed to fetch weather data.")
+  }
+
+  const text = await response.text()
+
+  try {
+    const parsed = JSON.parse(text)
+
+    if (Array.isArray(parsed.weather)) {
+      await redis.set(queryString, text, { PX: TEN_MINUTES })
+    } else {
+      console.warn("Fetched data missing 'weather', not caching.")
+    }
+
+    return parsed
+  } catch (e) {
+    console.error("Failed to parse weather API response:", e)
+    throw e
+  }
 }
