@@ -1,10 +1,14 @@
 name: cst8918-a03-infra
-description: A Remix app deployed with the Azure Container App service
+description: Deploys a Remix weather app using Azure Container Instances, ACR, and Redis
 runtime:
   name: nodejs
   options:
     packagemanager: npm
 config:
+  weatherApiKey:
+    description: OpenWeatherMap API Key
+  imageTag:
+    description: Docker image tag for the weather app (e.g., v0.3.0)
   pulumi:tags:
     value:
       pulumi:template: typescript

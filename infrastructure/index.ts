@@ -1,126 +1,108 @@
 import * as pulumi from "@pulumi/pulumi";
-import * as resources from '@pulumi/azure-native/resources'
-import * as containerregistry from '@pulumi/azure-native/containerregistry'
-import * as dockerBuild from '@pulumi/docker-build'
-// Other imports at the top of the module
-import * as containerinstance from '@pulumi/azure-native/containerinstance'
-// Import the configuration settings for the current stack.
-const config = new pulumi.Config()
-const appPath = config.require('appPath')
-const prefixName = config.require('prefixName')
-const imageName = prefixName
-const imageTag = config.require('imageTag')
-// Azure container instances (ACI) service does not yet support port mapping
-// so, the containerPort and publicPort must be the same
-const containerPort = config.requireNumber('containerPort')
-const publicPort = config.requireNumber('publicPort')
-const cpu = config.requireNumber('cpu')
-const memory = config.requireNumber('memory')
- 
- 
-// Create a resource group.
-const resourceGroup = new resources.ResourceGroup(`${prefixName}rg`)
- 
-// Create the container registry.
-const registry = new containerregistry.Registry(`${prefixName}ACR`, {
-  resourceGroupName: resourceGroup.name,
-  adminUserEnabled: true,
-  sku: {
-    name: containerregistry.SkuName.Basic,
-  },
-})
- 
-// Get the authentication credentials for the container registry.
-const registryCredentials = containerregistry
-  .listRegistryCredentialsOutput({
-    resourceGroupName: resourceGroup.name,
-    registryName: registry.name,
-  })
-  .apply((creds) => {
-    return {
-      username: creds.username!,
-      password: creds.passwords![0].value!,
-    }
-  })
- 
- 
- 
-// Define the container image for the service
-const image = new dockerBuild.Image(`${prefixName}-image`, {
-  tags: [pulumi.interpolate`${registry.loginServer}/${imageName}:${imageTag}`],
-  context: { location: appPath },
-  dockerfile: { location: `${appPath}/Dockerfile` },
-  target: 'production',  // This matches the stage defined in Dockerfile
-  platforms: ['linux/amd64', 'linux/arm64'],
-  push: true,
-  registries: [
-    {
-      address: registry.loginServer,
-      username: registryCredentials.username,
-      password: registryCredentials.password,
-    },
-  ],
+import * as azure from "@pulumi/azure-native";
+import * as containerregistry from "@pulumi/azure-native/containerregistry";
+import * as containerinstance from "@pulumi/azure-native/containerinstance";
+import * as resources from "@pulumi/azure-native/resources";
+
+// Pulumi config
+const config = new pulumi.Config();
+const weatherApiKey = config.requireSecret("weatherApiKey");
+const imageTag = config.require("imageTag"); // e.g., "v0.3.0"
+const prefixName = pulumi.getProject();
+
+// Resource Group
+const resourceGroup = new resources.ResourceGroup(`${prefixName}-rg`, {
+  location: "westus3",
 });
- 
-// Create a container group in the Azure Container App service and make it publicly accessible.
-const containerGroup = new containerinstance.ContainerGroup(
-  `${prefixName}-container-group`,
-  {
-    resourceGroupName: resourceGroup.name,
-    osType: 'linux',
-    restartPolicy: 'always',
-    imageRegistryCredentials: [
-      {
-        server: registry.loginServer,
-        username: registryCredentials.username,
-        password: registryCredentials.password,
-      },
-    ],
-    containers: [
-      {
-        name: imageName,
-        image: image.ref,
-        ports: [
-          {
-            port: containerPort,
-            protocol: 'tcp',
-          },
-        ],
-        environmentVariables: [
-          {
-            name: 'PORT',
-            value: containerPort.toString(),
-          },
-          {
-            name: 'WEATHER_API_KEY',
-            value: 'a9990d8a4db12a4ae9ec7520d8c346b9',
-          },
-        ],
-        resources: {
-          requests: {
-            cpu: cpu,
-            memoryInGB: memory,
-          },
-        },
-      },
-    ],
-    ipAddress: {
-      type: containerinstance.ContainerGroupIpAddressType.Public,
-      dnsNameLabel: `${imageName}-v2`, // or use a timestamp or short hash
-      ports: [
-        {
-          port: publicPort,
-          protocol: 'tcp',
-        },
-      ],
-    },
+
+// Valid, unique ACR name (alphanumeric only, lowercase, max 50 characters)
+const acrName = `${prefixName}acr${pulumi.getStack()}`.replace(/[^a-zA-Z0-9]/g, "").toLowerCase().substring(0, 50);
+
+
+const registry = new containerregistry.Registry(acrName, {
+  registryName: acrName,
+  resourceGroupName: resourceGroup.name,
+  location: resourceGroup.location,
+  sku: {
+    name: "Basic",
   },
-)
- 
- 
-// Export the service's IP address, hostname, and fully-qualified URL.
-export const hostname = containerGroup.ipAddress.apply((addr) => addr!.fqdn!)
-export const ip = containerGroup.ipAddress.apply((addr) => addr!.ip!)
-export const url = containerGroup.ipAddress.apply(
-  (addr) => `http://${addr!.fqdn!}:${containerPort}`,
-)
+  adminUserEnabled: true,
+});
+
+// ACR credentials
+const creds = pulumi
+  .all([registry.name, resourceGroup.name])
+  .apply(([name, rg]) =>
+    containerregistry.listRegistryCredentials({ registryName: name, resourceGroupName: rg })
+  );
+
+const adminUsername = creds.apply(c => c.username!);
+const adminPassword = creds.apply(c => c.passwords![0].value!);
+const loginServer = registry.loginServer;
+
+// Redis instance
+const redis = new azure.redis.Redis(`${prefixName}-redis`, {
+  name: `${prefixName}-weather-cache`,
+  location: resourceGroup.location,
+  resourceGroupName: resourceGroup.name,
+  enableNonSslPort: true,
+  redisVersion: "6",
+  minimumTlsVersion: "1.2",
+  redisConfiguration: {
+    maxmemoryPolicy: "allkeys-lru",
+  },
+  sku: {
+    name: "Basic",
+    family: "C",
+    capacity: 0,
+  },
+});
+
+// Redis connection string
+const redisAccessKey = azure.redis.listRedisKeysOutput({
+  name: redis.name,
+  resourceGroupName: resourceGroup.name,
+}).apply(keys => keys.primaryKey);
+
+const redisConnectionString = pulumi.interpolate`rediss://:${redisAccessKey}@${redis.hostName}:${redis.sslPort}`;
+
+// Container instance with Redis and weather API key
+const containerGroup = new containerinstance.ContainerGroup(`${prefixName}-cg`, {
+  resourceGroupName: resourceGroup.name,
+  location: resourceGroup.location,
+  osType: "Linux",
+  containers: [{
+    name: "weather-app",
+image: pulumi.interpolate`${registry.loginServer}/cst8918-a03-infra-weather:${imageTag}`,
+    resources: {
+      requests: {
+        cpu: 0.5,
+        memoryInGB: 1,
+      },
+    },
+    ports: [{ port: 80 }], // Make sure port matches ACI exposed port
+    environmentVariables: [
+      {
+        name: "WEATHER_API_KEY",
+        secureValue: weatherApiKey,
+      },
+      {
+        name: "REDIS_URL",
+        value: redisConnectionString,
+      },
+    ],
+  }],
+  imageRegistryCredentials: [{
+    server: loginServer,
+    username: adminUsername,
+    password: adminPassword,
+  }],
+  restartPolicy: "Always",
+  ipAddress: {
+    type: "Public",
+    ports: [{ port: 80, protocol: "Tcp" }],
+  },
+});
+
+// Export the app URL
+export const appUrl = containerGroup.ipAddress.apply(ip => ip && ip.ip ? `http://${ip.ip}` : "No public IP assigned");
